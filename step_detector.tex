@@ -1,0 +1,293 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[UTF8]{ctex}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\geometry{margin=2.5cm}
+
+\title{\textbf{基于IMU的计步算法分析与比较}}
+\author{计步检测系统}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{概述}
+
+本文档详细介绍三种基于惯性测量单元(IMU)加速度数据的计步算法：
+\begin{enumerate}
+    \item \textbf{峰值检测法} (Peak Detection)
+    \item \textbf{过零检测法} (Zero-Crossing Detection)
+    \item \textbf{自相关函数法} (Autocorrelation)
+\end{enumerate}
+
+三种方法共享相同的预处理流程，仅在最终计步算法上有所不同。
+
+%========================================
+\section{通用预处理流程}
+%========================================
+
+所有三种方法均采用以下预处理步骤：
+
+\subsection{步骤1：数据加载}
+从IMU传感器读取三轴加速度数据 $(a_x, a_y, a_z)$ 及对应时间戳。
+
+\subsection{步骤2：计算合成加速度}
+将三轴加速度合成为标量模值，消除设备方向的影响：
+\begin{equation}
+    a_{mag} = \sqrt{a_x^2 + a_y^2 + a_z^2}
+\end{equation}
+
+\subsection{步骤3：带通滤波}
+应用4阶巴特沃斯带通滤波器，保留步态相关频率成分：
+\begin{itemize}
+    \item 低截止频率：$f_L = 0.5$ Hz（排除缓慢漂移）
+    \item 高截止频率：$f_H = 5.0$ Hz（排除高频噪声）
+    \item 正常步频范围：$0.5 \sim 3.0$ Hz（约每秒0.5到3步）
+\end{itemize}
+
+滤波器传递函数：
+\begin{equation}
+    H(s) = \frac{\omega_H^n \cdot s^n}{(s^2 + \frac{\omega_L}{Q}s + \omega_L^2)^{n/2} \cdot (s^2 + \frac{\omega_H}{Q}s + \omega_H^2)^{n/2}}
+\end{equation}
+
+使用 \texttt{scipy.signal.filtfilt} 进行零相位滤波，避免相位延迟。
+
+%========================================
+\section{方法一：峰值检测法 (Peak Detection)}
+%========================================
+
+\subsection{算法原理}
+每一步行走会在加速度信号中产生一个明显的峰值。通过检测信号中的局部最大值来计数步数。
+
+\subsection{算法步骤}
+
+\begin{enumerate}
+    \item \textbf{计算自适应阈值}：
+    \begin{equation}
+        \text{threshold} = \mu + 0.5\sigma
+    \end{equation}
+    其中 $\mu$ 为信号均值，$\sigma$ 为标准差。
+    
+    \item \textbf{设置最小峰值间距}：
+    \begin{equation}
+        d_{min} = \frac{f_s}{f_{max}} = \frac{100}{3} \approx 33 \text{ 样本}
+    \end{equation}
+    其中 $f_s$ 为采样率，$f_{max}$ 为最大步频。
+    
+    \item \textbf{计算峰值突出度}：
+    \begin{equation}
+        \text{prominence} = 0.3\sigma
+    \end{equation}
+    
+    \item \textbf{峰值检测}：使用 \texttt{scipy.signal.find\_peaks} 函数，满足：
+    \begin{itemize}
+        \item 幅值 $>$ 阈值
+        \item 与相邻峰值距离 $\geq d_{min}$
+        \item 突出度 $\geq$ prominence
+    \end{itemize}
+    
+    \item \textbf{计数}：峰值数量即为步数
+\end{enumerate}
+
+\subsection{数学表达}
+对于信号 $x[n]$，若满足以下条件则 $n$ 为峰值点：
+\begin{equation}
+    x[n] > x[n-1] \land x[n] \geq x[n+1] \land x[n] > \text{threshold}
+\end{equation}
+
+%========================================
+\section{方法二：过零检测法 (Zero-Crossing Detection)}
+%========================================
+
+\subsection{算法原理}
+步态信号具有周期性，去除直流分量后，信号会周期性地穿过零点。通过检测从负到正的过零次数来估计步数。
+
+\subsection{算法步骤}
+
+\begin{enumerate}
+    \item \textbf{去除直流分量}：
+    \begin{equation}
+        x'[n] = x[n] - \bar{x}
+    \end{equation}
+    其中 $\bar{x} = \frac{1}{N}\sum_{i=0}^{N-1}x[i]$
+    
+    \item \textbf{设置最小过零间隔}：
+    \begin{equation}
+        T_{min} = 0.3 \times f_s = 30 \text{ 样本}
+    \end{equation}
+    
+    \item \textbf{检测上升沿过零点}：
+    \begin{equation}
+        \text{crossing}[n] = 
+        \begin{cases}
+            1 & \text{if } x'[n-1] < 0 \land x'[n] \geq 0 \\
+            0 & \text{otherwise}
+        \end{cases}
+    \end{equation}
+    
+    \item \textbf{应用时间约束}：相邻过零点间隔需 $\geq T_{min}$
+    
+    \item \textbf{计数}：有效过零点数量即为步数
+\end{enumerate}
+
+\subsection{数学表达}
+过零检测器的输出：
+\begin{equation}
+    ZC = \sum_{n=1}^{N-1} \mathbf{1}[x'[n-1] \cdot x'[n] < 0 \land x'[n] > x'[n-1]]
+\end{equation}
+
+%========================================
+\section{方法三：自相关函数法 (Autocorrelation)}
+%========================================
+
+\subsection{算法原理}
+步态信号具有周期性，其自相关函数在周期对应的时延处会出现峰值。通过分析自相关函数估计步态周期，进而计算步数。
+
+\subsection{算法步骤}
+
+\begin{enumerate}
+    \item \textbf{去除直流分量}：
+    \begin{equation}
+        x'[n] = x[n] - \bar{x}
+    \end{equation}
+    
+    \item \textbf{计算自相关函数}：
+    \begin{equation}
+        R_{xx}[\tau] = \sum_{n=0}^{N-1-\tau} x'[n] \cdot x'[n+\tau]
+    \end{equation}
+    
+    \item \textbf{归一化}：
+    \begin{equation}
+        R'_{xx}[\tau] = \frac{R_{xx}[\tau]}{R_{xx}[0]}
+    \end{equation}
+    
+    \item \textbf{确定搜索范围}：
+    \begin{align}
+        \tau_{min} &= \frac{f_s}{f_{max}} = \frac{100}{3.0} \approx 33 \text{ 样本} \\
+        \tau_{max} &= \frac{f_s}{f_{min}} = \frac{100}{0.5} = 200 \text{ 样本}
+    \end{align}
+    
+    \item \textbf{找到第一个主峰}：在 $[\tau_{min}, \tau_{max}]$ 范围内找第一个峰值，对应步态周期 $T_s$
+    
+    \item \textbf{计算步频}：
+    \begin{equation}
+        f_{step} = \frac{f_s}{T_s}
+    \end{equation}
+    
+    \item \textbf{估计步数}：
+    \begin{equation}
+        N_{steps} = \lfloor D \times f_{step} \rfloor
+    \end{equation}
+    其中 $D$ 为信号总时长（秒）
+\end{enumerate}
+
+\subsection{数学表达}
+自相关函数反映信号与其延迟版本的相似度：
+\begin{equation}
+    R_{xx}[\tau] = E[x[n] \cdot x[n+\tau]] = \int_{-\infty}^{\infty} x(t)x(t+\tau)dt
+\end{equation}
+
+%========================================
+\section{方法比较}
+%========================================
+
+\subsection{优缺点对比}
+
+\begin{table}[h]
+\centering
+\caption{三种计步方法优缺点比较}
+\begin{tabular}{@{}p{2.5cm}p{5cm}p{5cm}@{}}
+\toprule
+\textbf{方法} & \textbf{优点} & \textbf{缺点} \\
+\midrule
+\textbf{峰值检测法} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 直观易理解
+    \item 计算效率高
+    \item 适合规律行走
+    \item 可精确定位每一步
+\end{itemize} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 对阈值敏感
+    \item 易受噪声干扰
+    \item 不规则步态误检多
+\end{itemize} \\
+\midrule
+\textbf{过零检测法} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 不依赖幅值阈值
+    \item 对信号幅值变化鲁棒
+    \item 实现简单
+    \item 计算开销小
+\end{itemize} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 对噪声敏感（产生虚假过零）
+    \item 需要良好的滤波
+    \item 难以处理非周期信号
+\end{itemize} \\
+\midrule
+\textbf{自相关函数法} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 抗噪声能力强
+    \item 可估计步频
+    \item 适合稳态行走分析
+    \item 对局部异常不敏感
+\end{itemize} & 
+\begin{itemize}[leftmargin=*,nosep]
+    \item 计算复杂度较高 $O(N^2)$
+    \item 需要较长数据段
+    \item 步频变化时精度下降
+    \item 无法精确定位每一步
+\end{itemize} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{适用场景}
+
+\begin{itemize}
+    \item \textbf{峰值检测法}：适合室内规律行走、需要精确定位每步时刻的应用
+    \item \textbf{过零检测法}：适合对实时性要求高、计算资源受限的嵌入式设备
+    \item \textbf{自相关函数法}：适合离线分析、步态周期估计、稳态长时间行走
+\end{itemize}
+
+\subsection{计算复杂度}
+
+\begin{table}[h]
+\centering
+\caption{计算复杂度比较}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{方法} & \textbf{时间复杂度} & \textbf{空间复杂度} \\
+\midrule
+峰值检测法 & $O(N)$ & $O(1)$ \\
+过零检测法 & $O(N)$ & $O(1)$ \\
+自相关函数法 & $O(N^2)$ 或 $O(N\log N)$* & $O(N)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+\small{*使用FFT加速}
+
+%========================================
+\section{总结}
+%========================================
+
+三种方法各有特点：
+\begin{enumerate}
+    \item \textbf{峰值检测法}：最常用，平衡了准确性和计算效率
+    \item \textbf{过零检测法}：最简单，适合资源受限场景
+    \item \textbf{自相关函数法}：最鲁棒，适合需要步频分析的场景
+\end{enumerate}
+
+实际应用中，可根据硬件资源、实时性要求和精度需求选择合适的方法，或结合多种方法进行融合以提高鲁棒性。
+
+\end{document}
